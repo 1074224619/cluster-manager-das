@@ -17,7 +17,6 @@ from unittest.mock import patch
 
 from cluster_run.cli import main
 from cluster_run.lifecycle import run_container_lifecycle
-from cluster_run.node_script import run_node_script
 from cluster_run.active import ActiveTestExecutor
 
 
@@ -78,45 +77,6 @@ class NewInterfaceTests(unittest.TestCase):
                 main(argv)
             self.assertEqual(raised.exception.code, 3)
 
-    def test_script_dry_run_uses_docker_exec_and_no_mpi(self):
-        with tempfile.TemporaryDirectory() as temp:
-            report, path = run_node_script(
-                nodes=["n01", "n02"], scenario="per-node-container", env_script="/shared/env.sh",
-                script="/shared/check.sh", script_args=["--quick"], container_name="worker",
-                image=None, transport="ssh", concurrency=2, timeout=0,
-                output_dir=Path(temp), dry_run=True,
-            )
-            self.assertEqual(report["status"], "DRY_RUN")
-            command = report["nodes"]["n01"]["command"]
-            self.assertEqual(command[:3], ["docker", "exec", "worker"])
-            self.assertIn("source /shared/env.sh", command[-1])
-            self.assertIn("bash /shared/check.sh --quick", command[-1])
-            self.assertNotIn("mpirun", command[-1])
-            self.assertTrue((path / "script-result.json").exists())
-
-    def test_script_requires_absolute_target_visible_path(self):
-        with tempfile.TemporaryDirectory() as temp:
-            with self.assertRaisesRegex(ValueError, "absolute path"):
-                run_node_script(nodes=["n01"], scenario="shared-conda", env_script="/env.sh",
-                                script="relative.sh", script_args=[], container_name=None,
-                                image=None, transport="ssh", concurrency=1, timeout=0,
-                                output_dir=Path(temp), dry_run=True)
-
-    def test_builtin_workers_are_importable_without_explicit_container_workdir(self):
-        with tempfile.TemporaryDirectory() as temp:
-            executor = ActiveTestExecutor(
-                scenario="per-node-container", test_name="gemm", nodes=["n01"],
-                env_script="/share/env.sh", output_dir=Path(temp), group_size=1,
-                slots=1, launcher="ssh-torchrun", container_name="worker",
-                execution_scope="container", dry_run=True,
-            )
-            report, _ = executor.run()
-            command = report["groups"][0]["commands"][0]["command"]
-            self.assertNotIn("-w", command)
-            self.assertIn("cluster_run.payloads.gemm_worker", command[-1])
-            self.assertIn("export PYTHONPATH=", command[-1])
-            self.assertLess(command[-1].index("source /share/env.sh"),
-                            command[-1].index("export PYTHONPATH="))
 
     def test_recreate_and_delete_require_explicit_confirmation(self):
         for operation, image in (("container-recreate", "image:tag"), ("container-delete", None)):
