@@ -343,7 +343,7 @@ IB 默认把全部节点作为一组，也可显式 `--group-size`；每组至�
 
 ## 容器生命周期设计
 
-四个完整操作名只用于 `per-node-container`。`container-status` 检查已有容器运行状态和镜像标签，不拉取镜像；create/recreate 才加载或拉取镜像并核对镜像 ID。检测命令不会隐式修复容器。
+四个完整操作名只用于 `per-node-container`。`container-status` 检查已有容器运行状态和镜像标签，不拉取镜像；create/recreate 在各目标节点优先复用 `-i/--image` 指定的本地镜像，明确缺失时才拉取；显式 `--image-tar` 保持归档导入优先，随后均核对镜像 ID。检测命令不会隐式修复容器。
 
 ### 查询与创建
 
