@@ -34,6 +34,10 @@ bash bin/hcu-cluster-run --version
 
 ## 容器操作
 
+创建和重建时，`-i/--image` 指定的镜像会在 hostfile 的每个目标节点宿主机上检查：本地存在则直接复用，Docker 明确报告镜像不存在时才执行 `docker pull`。已有镜像不会自动更新；SSH、Docker 服务或权限检查失败时直接报错。逐节点明细记录镜像来源 `local` 或 `pull`。
+
+显式传入 `--image-tar` 时仍按原逻辑导入归档。多节点继续核对镜像 ID 一致性；重建需在全部节点预检通过后才替换旧容器。
+
 ```bash
 # 查询已有容器
 bash bin/hcu-cluster-run per-node-container container-status \

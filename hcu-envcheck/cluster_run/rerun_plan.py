@@ -53,11 +53,15 @@ def main() -> int:
         return fail(2, f"cannot read plan file: {exc}")
     except json.JSONDecodeError as exc:
         return fail(2, f"plan is not valid JSON: {exc}")
+    if not isinstance(data, dict):
+        return fail(2, f"plan top level must be a JSON object, got {type(data).__name__}")
     if data.get("schema_version") not in {1, SCHEMA_VERSION}:
         return fail(2, f"unsupported schema_version: {data.get('schema_version')!r}")
     if data.get("operation") != args.operation:
         return fail(3, f"operation mismatch: plan={data.get('operation')!r} invocation={args.operation!r}")
     entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        return fail(2, f"plan entries must be a JSON array, got {type(entries).__name__}")
     if not entries:
         return fail(7, "plan has no entries; nothing to rerun")
 
@@ -68,9 +72,14 @@ def main() -> int:
     if _config_fingerprint(control) != data.get("config_fingerprint"):
         return fail(5, "plan fingerprint does not match its source run (export stale or edited)")
     stamp = _deployment_stamp()
-    if stamp["reporting_md5"] != (data.get("deployment") or {}).get("reporting_md5"):
+    deployment = data.get("deployment") or {}
+    if not isinstance(deployment, dict):
+        return fail(2, "plan deployment must be a JSON object")
+    if stamp["reporting_md5"] != deployment.get("reporting_md5"):
         return fail(6, "deployment changed since the export; re-export the plan with the current code")
     scale = data.get("scale") or {}
+    if not isinstance(scale, dict):
+        return fail(2, "plan scale must be a JSON object")
     keys = ("group_size", "gpus_per_node") if control.get("gpus_per_node") and args.operation in {"rccl", "deepep"} else ("group_size", "slots")
     for key in keys:
         if str(control.get(key, "")) != str(scale.get(key, "")):
@@ -84,8 +93,13 @@ def main() -> int:
     single_run_items: set[tuple[str, str]] = set()
     unconfirmed = 0
     for entry in entries:
+        if not isinstance(entry, dict):
+            return fail(2, f"entry is not a JSON object: {entry!r}")
         group = entry.get("group") or ""
-        members = [m for m in entry.get("members", []) if m]
+        members = entry.get("members", [])
+        if not isinstance(members, list):
+            return fail(9, "entry members must be a JSON array")
+        members = [m for m in members if m]
         if not group or not members:
             return fail(9, f"entry missing group or members: stage={entry.get('stage_id')!r}")
         if args.operation in {"rccl", "deepep"} and (not re.fullmatch(r"group-[0-9]+", group)

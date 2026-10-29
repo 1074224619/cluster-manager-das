@@ -188,6 +188,21 @@ load_or_pull_image() {
     if [[ -n $IMAGE_TAR ]]; then
         remote "$node" docker load -i "$IMAGE_TAR" >/dev/null
     else
+        local inspected inspect_rc
+        if inspected=$(remote "$node" docker image inspect -f '{{.Id}}' "$IMAGE" 2>&1); then
+            printf '[IMAGE] node=%s source=local image=%s\n' "$node" "$IMAGE"
+            return 0
+        else
+            inspect_rc=$?
+        fi
+        # Only Docker's explicit missing-image response allows a pull.
+        # SSH, daemon and permission failures must remain preflight errors.
+        if (( inspect_rc != 1 )) || [[ $inspected != *'No such image:'* ]]; then
+            printf '[ERROR] node=%s image inspection failed (rc=%s): %s\n' \
+                "$node" "$inspect_rc" "$inspected" >&2
+            return "$inspect_rc"
+        fi
+        printf '[IMAGE] node=%s source=pull image=%s\n' "$node" "$IMAGE"
         remote "$node" docker pull "$IMAGE" >/dev/null
     fi
 }
@@ -329,7 +344,7 @@ if [[ $OPERATION == container-recreate ]]; then
         remote "$node" docker info >/dev/null; rc=$?
         (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "docker info failed on $node"; die "Docker unavailable on $node"; }
         load_or_pull_image "$node"; rc=$?
-        (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image load/pull failed"; die "image load/pull failed on $node"; }
+        (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image preparation failed"; die "image preparation failed on $node"; }
         current=$(remote "$node" docker image inspect -f '{{.Id}}' "$IMAGE"); rc=$?
         (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image inspect failed"; die "image inspect failed on $node"; }
         [[ $current == sha256:* ]] || { node_result "$node" preflight FAIL EXECUTION_FAILED 1 - "$IMAGE" "invalid image ID: $current"; die "invalid image ID on $node"; }
@@ -383,7 +398,7 @@ else
         remote "$node" docker info >/dev/null; rc=$?
         (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "docker info failed on $node"; die "Docker unavailable on $node"; }
         load_or_pull_image "$node"; rc=$?
-        (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image load/pull failed"; die "image load/pull failed on $node"; }
+        (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image preparation failed"; die "image preparation failed on $node"; }
         current=$(remote "$node" docker image inspect -f '{{.Id}}' "$IMAGE"); rc=$?
         (( rc == 0 )) || { node_result "$node" preflight FAIL EXECUTION_FAILED "$rc" - "$IMAGE" "image inspect failed"; die "image inspect failed on $node"; }
         [[ $current == sha256:* ]] || { node_result "$node" preflight FAIL EXECUTION_FAILED 1 - "$IMAGE" "invalid image ID: $current"; die "invalid image ID on $node"; }

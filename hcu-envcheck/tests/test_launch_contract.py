@@ -4,6 +4,9 @@
 from __future__ import annotations
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -16,19 +19,37 @@ from cluster_run.cli import main
 from cluster_run.preflight import verify_container_mpi_peers
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_cli(case, args, *, cwd=None):
+    temporary = tempfile.TemporaryDirectory()
+    case.addCleanup(temporary.cleanup)
+    root = Path(temporary.name)
+    calls = root / "transport-calls"
+    for name in ("ssh", "docker"):
+        path = root / name
+        path.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$TEST_TRANSPORT_CALLS"\nexit 97\n', encoding="utf-8")
+        path.chmod(0o755)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("HCU_", "RCCL_", "CLUSTER_", "NCCL_", "DEFAULTS_"))}
+    env.update(PATH=str(root) + os.pathsep + os.environ["PATH"], PYTHONPATH=str(ROOT),
+               PYTHONDONTWRITEBYTECODE="1", TEST_TRANSPORT_CALLS=str(calls))
+    command = [sys.executable, "-B", "-c", "import sys; from cluster_run.cli import main; sys.exit(main(sys.argv[1:]))", *args]
+    result = subprocess.run(command, cwd=cwd or ROOT, env=env, text=True, capture_output=True, timeout=20)
+    return result, calls.read_text().splitlines() if calls.exists() else []
+
+
 class LaunchContractTests(unittest.TestCase):
     def test_removed_test_modes_are_rejected_before_reading_nodes(self):
         for operation, options in (("gemm", []), ("rccl", ["--profile", "worker"]),
                                    ("rccl", ["--profile", "rocblas"])):
-            with self.subTest(operation=operation, options=options), \
-                 patch("cluster_run.cli.read_nodes") as read_nodes, \
-                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                try:
-                    code = main(["shared-conda", operation, "-f", "missing-hostfile", *options, "--dry-run"])
-                except SystemExit as stopped:
-                    code = stopped.code
-                self.assertEqual(code, 3)
-                read_nodes.assert_not_called()
+            with self.subTest(operation=operation, options=options):
+                result, calls = run_cli(self, ["shared-conda", operation, "-f", "missing-hostfile", *options, "--dry-run"])
+                self.assertEqual(result.returncode, 3 if operation == "gemm" else 2)
+                self.assertIn("invalid choice" if operation == "gemm" else "unsupported staged argument: --profile", result.stderr)
+                self.assertNotIn("readable hostfile required", result.stderr)
+                self.assertEqual(calls, [], "invalid modes must fail before transport")
 
     def test_executor_rejects_removed_builtin_tests(self):
         for name, profile in (("gemm", None), ("gemm", "rocblas"), ("rccl", "worker")):
@@ -85,19 +106,28 @@ class LaunchContractTests(unittest.TestCase):
                                    "--container", "worker", "--allow-root-mpi"])
         self.assertEqual(stopped.exception.code, 3)
 
-    def test_cli_rccl_defaults_and_explicit_binary_profile_match(self):
+    def test_cli_rccl_defaults_and_explicit_scale_match_and_legacy_flags_are_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             nodes = Path(temp) / "nodes"
-            nodes.write_text("n1\nn2\n")
-            for index, options in enumerate(([], ["--profile", "rccl-tests"], ["--launcher", "mpirun"])):
+            nodes.write_text("n1\nn2\n", encoding="utf-8")
+            outputs = []
+            for index, options in enumerate(([], ["--group-size", "1", "--gpus-per-node", "8"])):
                 folder = Path(temp) / str(index)
-                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    code = main(["per-node-container", "rccl", "-f", str(nodes), "--env-script", "/env.sh",
-                                 "--container", "worker", "-i", "image:tag", "--dry-run", "-o", str(folder), *options])
-                self.assertEqual(code, 0)
-                report = json.loads(next(folder.glob("container_rccl_*/.state/active-result.json")).read_text())
-                self.assertEqual(report["profile"], "rccl-tests")
-                self.assertEqual(report["launcher"], "mpirun")
+                result, calls = run_cli(self, ["per-node-container", "rccl", "-f", str(nodes), "--env-script", "/env.sh",
+                    "--container", "worker", "-i", "image:tag", "--dry-run", "-o", str(folder), *options])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("groups=2 group-size=1 gpus-per-node=8", result.stdout)
+                self.assertEqual([line.split()[2] for line in result.stdout.splitlines() if line.startswith("STAGE ")],
+                    ["all_reduce", "all_gather", "broadcast", "reduce", "reduce_scatter", "gather", "scatter", "alltoall", "alltoallv", "sendrecv"])
+                self.assertEqual(calls, [])
+                self.assertFalse(folder.exists(), "dry-run must not invent execution reports")
+                outputs.append(result.stdout)
+            self.assertEqual(outputs[0], outputs[1])
+            for options in (["--profile", "rccl-tests"], ["--launcher", "mpirun"]):
+                result, calls = run_cli(self, ["per-node-container", "rccl", "-f", str(nodes), "--dry-run", *options])
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("unsupported staged argument: " + options[0], result.stderr)
+                self.assertEqual(calls, [])
 
 
     def test_payload_json_never_masks_execution_failure(self):

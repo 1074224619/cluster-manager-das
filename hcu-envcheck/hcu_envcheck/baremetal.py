@@ -1099,6 +1099,9 @@ class BaremetalClusterExecutor:
             controller_timed_out = True
             controller_stdout = _text_from_timeout(exc.stdout)
             controller_stderr = _text_from_timeout(exc.stderr)
+            if router is not None:
+                router.feed("stdout", controller_stdout.encode("utf-8"))
+                router.feed("stderr", controller_stderr.encode("utf-8"))
         except OSError as exc:
             controller_launch_error = str(exc)
             controller_stderr = str(exc)

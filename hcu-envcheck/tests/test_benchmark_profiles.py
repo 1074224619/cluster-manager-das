@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import json
+import sys
 import csv
 import shlex
 import shutil
@@ -64,12 +66,41 @@ class BenchmarkProfileTests(unittest.TestCase):
             [BASH, "-c", "pwd -P"], cwd=self.root, env=self.env,
             capture_output=True, text=True, encoding="utf-8", check=True,
         ).stdout.strip()
+        # Exercise the actual selector, including record/mask/PCI checks, with
+        # a CPU-only HIP probe. No real runtime, GPU or performance tool is used.
+        probe = self.root / "python-fixture.py"
+        probe.write_text(r'''
+import json, os, runpy, subprocess, sys
+args = sys.argv[1:]
+if args[:1] == ["-B"]:
+    args = args[1:]
+if args and args[0].endswith("/device_selection.py"):
+    real_run = subprocess.run
+    def run(command, **kwargs):
+        if command[-1:] == ["--probe"] and command[-2].endswith("/device_selection.py"):
+            env = kwargs["env"]
+            mask = env.get("HIP_VISIBLE_DEVICES", ",".join(map(str, range(8))))
+            node = env.get("FAKE_RANK_NODE", "node0")
+            index = int(node[4:]) if node.startswith("node") else 0
+            pci = [f"0000:{3 + index * 16 + int(i):02x}:00.0" for i in mask.split(",")]
+            return subprocess.CompletedProcess(command, 0, json.dumps(pci), "")
+        return real_run(command, **kwargs)
+    subprocess.run = run
+    sys.argv = args
+    runpy.run_path(args[0], run_name="__main__")
+else:
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+''', encoding="utf-8")
+        self.tool("python3", "exec " + shlex.quote(_target_path(Path(sys.executable)))
+                  + " " + shlex.quote(_target_path(probe)) + ' "$@"\n')
         self.rccl_body = r'''
 [[ ${BENCH_ENV_READY:-unset} == ${FAKE_RANK_NODE:-leader} ]] || exit 91
 if [[ -n ${HCU_TASK_TOKEN:-} ]]; then
   [[ ${HCU_TASK_MEMBER:-} =~ ^[0-9]+:[0-9]+$ ]] || exit 93
   printf '%s|%s\n' "$HCU_TASK_TOKEN" "$HCU_TASK_MEMBER" >> "$GUARD_CALLS"
 fi
+expected_mask=$(seq -s, 0 "$((HCU_GPUS_PER_NODE - 1))")
+[[ ${HIP_VISIBLE_DEVICES:-} == "$expected_mask" ]] || exit 94
 cards= minimum= maximum= factor=
 for ((i=1; i<=$#; i++)); do
   j=$((i+1))
@@ -121,7 +152,7 @@ while (($#)); do
       if [[ $setting == *=* ]]; then exports+=("$setting")
       elif [[ -v $setting ]]; then exports+=("$setting=${!setting}"); fi
       shift 2;;
-    --map-by|--bind-to|--wdir) shift 2;;
+    --map-by|--rank-by|--bind-to|--wdir) shift 2;;
     *) break;;
   esac
 done
@@ -156,6 +187,15 @@ done
     def hostfile(self, nodes=1, slots=8):
         path = self.root / "hostfile"
         path.write_text("\n".join(f"node{i} slots={slots}" for i in range(nodes)), encoding="utf-8")
+        self.gpus_per_node = slots
+        group = self.root / "prepared" / "group-000"
+        group.mkdir(parents=True, exist_ok=True)
+        fields = ["node", "gpus_per_node", "hip_visible_devices", "pci_devices"]
+        rows = [[f"node{i}", slots, ",".join(map(str, range(slots))),
+                 [f"0000:{3 + i * 16 + j:02x}:00.0" for j in range(slots)]] for i in range(nodes)]
+        (group / "facts.json").write_text(json.dumps({"schema_version": 2, "group": "group-000",
+            "revision": 1, "tables": {"devices": {"fields": fields, "rows": rows}}}), encoding="utf-8")
+        self.env.update(HCU_DEVICE_SELECTION_DIR=_target_path(group / "devices"), HCU_GROUP_HOSTFILE=_target_path(path))
         return _target_path(path)  # deliberately no trailing newline
 
     def baseline(self, np=8):
@@ -164,6 +204,8 @@ done
         return _target_path(path)
 
     def run_payload(self, script, args, *, env=None):
+        if script == "rccl_perf_test.sh":
+            args = [*args, "--gpus-per-node", str(self.gpus_per_node)]
         command = ["bash", _target_path(PAYLOADS / script) if isinstance(script, str) else _target_path(script), *args]
         shell = f"set -e; source {shlex.quote(_target_path(self.env_script))}; exec {shlex.join(command)}"
         return subprocess.run([BASH, "-c", shell], cwd=self.root, env=self.env | (env or {}),
@@ -192,7 +234,7 @@ done
         with self.env_script.open("a", encoding="utf-8") as stream:
             stream.write(f'export RCCL_BIN_DIR={shlex.quote(_target_path(self.root))}/"${{FAKE_RANK_NODE:-leader}}"\n')
         result = self.run_payload("rccl_perf_test.sh", self.rccl_args(2, 2) +
-                                  ["--tests", "all_reduce", "--port", "25901", "--iface", "test0"])
+                                  ["--tests", "all_reduce", "--port", "25901"], env={"NCCL_SOCKET_IFNAME": "test0"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         mpi = self.mpi_calls.read_text(encoding="utf-8").splitlines()
         self.assertIn("-p 25901", mpi)
@@ -373,7 +415,7 @@ printf 'ARG=%s\n' "$@" >> "$CORE_EVIDENCE"
 
     def test_missing_binary_blocks_complete_suite_before_any_launch(self):
         (self.bin / "all_reduce_perf").unlink()
-        result = self.run_payload("rccl_perf_test.sh", self.rccl_args() + ["--bin-dir", _target_path(self.bin)])
+        result = self.run_payload("rccl_perf_test.sh", self.rccl_args(), env={"RCCL_BIN_DIR": _target_path(self.bin)})
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("all_reduce_perf", result.stderr)
         self.assertFalse(self.tool_lines())
@@ -397,11 +439,16 @@ printf 'ARG=%s\n' "$@" >> "$CORE_EVIDENCE"
                       "in_place_algbw_gbps", "in_place_busbw_gbps"):
             self.assertEqual(row[field], "None")
 
-    def test_network_environment_overrides_defaults_and_flags_win_after_rank_source(self):
+    def test_network_environment_overrides_defaults_and_snapshot_wins_after_rank_source(self):
         with self.env_script.open("a", encoding="utf-8") as stream:
             stream.write('export NCCL_NET_PLUGIN=site-plugin NCCL_PXN_DISABLE=1 RCCL_PXN_GPU_BALANCE=0\n'
                          'export NCCL_NET_GDR_LEVEL=2 NCCL_NET_GDR_READ=0 NCCL_TOPO_FILE=/site/topo.xml\n'
-                         'export NCCL_SOCKET_IFNAME=env0 UCX_NET_DEVICES=env-ib\n')
+                         'export NCCL_SOCKET_IFNAME=env0 UCX_NET_DEVICES=env-ib\n'
+                         # The leader chooses the target configuration; ranks
+                         # source conflicting defaults before the saved snapshot.
+                         'if [[ ${FAKE_RANK_NODE:-leader} == leader ]]; then\n'
+                         '  export NCCL_SOCKET_IFNAME=chosen0 UCX_NET_DEVICES=chosen-ib NCCL_TOPO_FILE=/chosen/topo.xml\n'
+                         'fi\n')
         evidence = self.root / "network-evidence"
         self.tool("broadcast_perf", r'''
 for name in NCCL_NET_PLUGIN NCCL_PXN_DISABLE RCCL_PXN_GPU_BALANCE NCCL_NET_GDR_LEVEL NCCL_NET_GDR_READ NCCL_TOPO_FILE NCCL_SOCKET_IFNAME UCX_NET_DEVICES; do
@@ -409,7 +456,6 @@ for name in NCCL_NET_PLUGIN NCCL_PXN_DISABLE RCCL_PXN_GPU_BALANCE NCCL_NET_GDR_L
 done
 ''' + self.rccl_body)
         result = self.run_payload("rccl_perf_test.sh", [self.hostfile(2, 1), "--tests", "broadcast",
-                                  "--iface", "flag0", "--ucx", "flag-ib", "--topo", "/flag/topo.xml",
                                   "--port", "26930", "--skip-idle-check"],
                                   env={"CORE_EVIDENCE": _target_path(evidence)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -417,8 +463,8 @@ done
         exports = self._mpi_exports()
         actual = evidence.read_text(encoding="utf-8").splitlines()
         for setting in ("NCCL_NET_PLUGIN=site-plugin", "NCCL_PXN_DISABLE=1", "RCCL_PXN_GPU_BALANCE=0",
-                        "NCCL_NET_GDR_LEVEL=2", "NCCL_NET_GDR_READ=0", "NCCL_TOPO_FILE=/flag/topo.xml",
-                        "NCCL_SOCKET_IFNAME=flag0", "UCX_NET_DEVICES=flag-ib"):
+                        "NCCL_NET_GDR_LEVEL=2", "NCCL_NET_GDR_READ=0", "NCCL_TOPO_FILE=/chosen/topo.xml",
+                        "NCCL_SOCKET_IFNAME=chosen0", "UCX_NET_DEVICES=chosen-ib"):
             name = setting.split("=", 1)[0]
             if name in {"NCCL_NET_GDR_LEVEL", "NCCL_NET_GDR_READ"}:
                 self.assertIn(name, exports)
@@ -426,7 +472,7 @@ done
                 self.assertIn(setting, exports)
             self.assertEqual(actual.count(setting), 2)
         self.assertIn("-p 26930", mpi)
-        self.assertTrue(all("iface=flag0" in line for line in self.tool_lines()))
+        self.assertTrue(all("iface=chosen0" in line for line in self.tool_lines()))
 
     def test_unset_plane_is_not_invented_and_unknown_collective_is_rejected(self):
         result = self.run_payload("rccl_perf_test.sh", self.rccl_args(2, 1) + ["--tests", "broadcast"])
@@ -444,7 +490,7 @@ done
         other = self.root / "explicit binaries"
         self.tool("all_reduce_perf", self.rccl_body.replace("200 200", "20 20"), other)
         result = self.run_payload("rccl_perf_test.sh", self.rccl_args() +
-                                  ["--tests", "all_reduce", "--bin-dir", _target_path(other)])
+                                  ["--tests", "all_reduce"], env={"RCCL_BIN_DIR": _target_path(other)})
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         with (self.root / "rccl-logs/rccl-summary.tsv").open(encoding="utf-8") as stream:
             row = next(csv.DictReader(stream, delimiter="\t"))
@@ -518,7 +564,9 @@ done
         rank_body = rank_file.read_text(encoding="utf-8")
         self.assertIn("source " + shlex.quote(_target_path(self.env_script)), rank_body)
         self.assertIn('bin=$(resolve_test_bin "$1")', rank_body)
-        self.assertIn('exec "$bin" "$@"', rank_body)
+        self.assertIn('exec "$python_bin" -B ', rank_body)
+        self.assertIn('device_selection.py exec --count "$HCU_GPUS_PER_NODE"', rank_body)
+        self.assertIn('--record "$HCU_DEVICE_SELECTION_DIR/$node.json" --node "$node" -- "$bin" "$@"', rank_body)
         launcher = (PAYLOADS / "test_rccl.sh").read_text(encoding="utf-8")
         self.assertIn('"${HCU_RCCL_GUARD_SCRIPT}" run "${HCU_TASK_TOKEN}" -- "${RANK_CMD[@]}"', launcher)
         self.assertFalse(self.tool_lines())

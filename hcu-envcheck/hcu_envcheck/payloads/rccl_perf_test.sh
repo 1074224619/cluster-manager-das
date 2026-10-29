@@ -494,7 +494,8 @@ for t in "${TESTS[@]}"; do
         rc=$?
     fi
     dt=$(( $(date +%s) - t0 ))
-    printf '%s\t%s\t%s\t%s\n' "$t" "$rc" "$dt" "$tlog" >> "$LOG_DIR/execution.tsv" \
+    if [[ ${HCU_DIRECT_GROUP_LOG:-0} == 1 ]]; then log_cell=''; else log_cell=$tlog; fi
+    printf '%s\t%s\t%s\t%s\n' "$t" "$rc" "$dt" "$log_cell" >> "$LOG_DIR/execution.tsv" \
         || die "无法写入 RCCL 执行记录"
     [[ ${HCU_DIRECT_GROUP_LOG:-0} == 1 ]] || printf '[%d/%d] %s end rc=%s elapsed=%ss\n' "$idx" "${#TESTS[@]}" "$t" "$rc" "$dt"
     if ((rc != 0)); then

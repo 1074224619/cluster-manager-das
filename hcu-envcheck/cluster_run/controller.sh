@@ -556,15 +556,13 @@ commit_facts() {
 }
 append_group_log() {
     local gi=$1 phase=$2 dir=$3 item=$4 stage=$5 token=$6 offset=$7 size=$8
-    local group=${GROUPS_LIST[gi]} prefix digest node source
+    local group=${GROUPS_LIST[gi]} prefix digest node
     if [[ $phase == prepare ]]; then prefix=prepared/$group
     else prefix=stages/$stage/groups/$group; fi
     digest=$(archive_log_digest "$PUBLIC_RUN_DIR/$group.log" "$offset" "$((size-offset))") || return 73
     {
         printf 'group\tstage_id\tphase\ttoken\tsource\toffset\tlength\tsha256\n'
-        for source in "$prefix/group.log"; do
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$stage" "$phase" "$token" "$source" "$offset" "$((size-offset))" "$digest"
-        done
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$stage" "$phase" "$token" "$prefix/group.log" "$offset" "$((size-offset))" "$digest"
         while read -r node _; do
             [[ -z $node || $node == \#* ]] || printf '%s\t%s\t%s\t%s\t%s/%s.log\t%s\t%s\t%s\n' \
                 "$group" "$stage" "$phase" "$token" "$prefix" "$node" "$offset" "$((size-offset))" "$digest"

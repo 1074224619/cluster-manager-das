@@ -44,7 +44,9 @@ def matrix_cases(root, hostfile):
     import string
     text = SCRIPT.read_text(encoding="utf-8").split('<<CASES\n', 1)[1].split('\nCASES\n', 1)[0]
     values = dict(RUN_DIR=str(root), HOSTFILE=str(hostfile), SHARED_ENV_SCRIPT='/target/shared.sh',
-                  NODE_LOCAL_ENV_SCRIPT='/target/local.sh', CONTAINER_ENV_SCRIPT='/target/container.sh')
+                  NODE_LOCAL_ENV_SCRIPT='/target/local.sh', CONTAINER_ENV_SCRIPT='/target/container.sh',
+                  SHARED_RCCL_ENV_SCRIPT='/target/shared-rccl.sh', NODE_LOCAL_RCCL_ENV_SCRIPT='/target/local-rccl.sh',
+                  CONTAINER_RCCL_ENV_SCRIPT='/target/container-rccl.sh')
     values.update({key: 'dry' for key in ('PROFILE_MODE','NETWORK_MODE')})
     (root / 'launcher-hostfile').write_text('n01\nn02\n', encoding='utf-8')
     return list(csv.DictReader(io.StringIO(string.Template(text).substitute(values)), delimiter='\t'))
@@ -220,14 +222,14 @@ class AcceptanceContractTests(unittest.TestCase):
 
 
     def test_removed_rccl_worker_is_rejected_without_execution(self):
-        from cluster_run.cli import main
-        case=self.case('shared-conda-rccl-tests')
-        with patch('cluster_run.cli.read_nodes') as read_nodes:
-            with redirect_stdout(io.StringIO()),redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit) as stopped:
-                    main(['shared-conda','rccl','-f',case['hostfile'],'--profile','worker','--dry-run'])
-        self.assertEqual(stopped.exception.code,3)
-        read_nodes.assert_not_called()
+        from tests.test_launch_contract import run_cli
+        case = self.case('shared-conda-rccl-tests')
+        result, calls = run_cli(self, ['shared-conda', 'rccl', '-f', case['hostfile'],
+                                    '--profile', 'worker', '--dry-run'])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('unsupported staged argument: --profile', result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertEqual(calls, [], 'rejected modes must never reach SSH or Docker')
 
 
     def test_precheck_is_blocked_not_executed_and_never_accepted_in_dryrun(self):
