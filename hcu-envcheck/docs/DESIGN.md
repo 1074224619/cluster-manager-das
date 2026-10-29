@@ -349,9 +349,9 @@ IB 默认把全部节点作为一组，也可显式 `--group-size`；每组至�
 
 命令示例见 [USER_GUIDE](USER_GUIDE.md#容器操作)。
 
-create/recreate 必须显式给出 `--port`，多机 RCCL/DeepEP 使用同一值作为 `--container-ssh-port`。镜像需含 SSH 服务与客户端。宿主机使用 host 网络；默认启用设备访问、privileged、host IPC、64G shm，并只读挂载 `/opt/hyhal` 和 `/root/.ssh`。显式添加工程/结果所在共享目录挂载。
+create/recreate 必须显式给出 `--port`，多机 RCCL/DeepEP 使用同一值作为 `--container-ssh-port`。镜像需含 SSH 服务与客户端。宿主机使用 host 网络；默认启用设备访问、privileged、host IPC、64G shm，并只读挂载 `/opt/hyhal`。显式添加工程/结果所在共享目录挂载。容器建好后，`HCU_SSH_DIR`（默认 `/root/.ssh`）的内容会被 `docker cp` 进容器的 `/root/.ssh` 并 chown 成 root，而不是挂载进去——有些集群本身就禁止挂载 `/root/.ssh`。
 
-默认挂载不会自动建立节点间信任关系，也不自动分发密钥。创建后有 sshd 启动与身份文件回读流程；完整的超时、失败汇总及身份边界尚待整改。container-status 只核对状态和镜像标签，不能据此证明跨容器 SSH 身份正确，见能力边界。
+这个复制步骤不会自动建立节点间信任关系，也不自动分发密钥，密钥对本身仍需提前放好。创建后有 sshd 启动与身份文件回读流程；完整的超时、失败汇总及身份边界尚待整改。container-status 只核对状态和镜像标签，不能据此证明跨容器 SSH 身份正确，见能力边界。
 
 ### 重建与删除
 
